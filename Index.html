@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand-Controlled Three.js Particles</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000000; }
+        canvas { display: block; }
+        #webcam { display: none; } /* Hide the video element */
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+</head>
+<body>
+
+    <canvas id="three-canvas"></canvas>
+    
+    <video id="webcam" playsinline></video>
+
+    <script id="vertexshader" type="x-shader/x-vertex">
+        uniform float uTime;
+        uniform float uHandPinchScale;
+        uniform int uCurrentTemplate;
+        
+        attribute vec3 color;
+        attribute float templateID;
+        
+        varying vec4 vColor;
+        
+        // Function to create a heart shape
+        vec3 heartShape(vec3 p) {
+            float x = p.x * 2.0;
+            float y = p.y * 2.0;
+            float z = p.z;
+            
+            float scale = 0.5 + abs(sin(uTime * 0.5)) * 0.1;
+            
+            // Heart implicit equation (simplified for visual effect)
+            float r = sqrt(x*x + y*y);
+            float angle = atan(y, x);
+            
+            float newR = pow(abs(sin(angle)), 0.5) * 0.8;
+            
+            x = newR * cos(angle) * scale;
+            y = newR * sin(angle) * scale - 0.5;
+            z = z * 0.5;
+            
+            return vec3(x, y, z) * 10.0;
+        }
+
+        // Function to create a Saturn ring shape
+        vec3 saturnShape(vec3 p) {
+            float baseRadius = 15.0;
+            float thickness = 0.5;
+            
+            float r = baseRadius + p.z * thickness * 5.0;
+            float angle = p.x * 6.28 + uTime * 0.1;
+            
+            float x = cos(angle) * r;
+            float z = sin(angle) * r;
+            float y = p.y * 3.0 * (0.5 + abs(sin(uTime * 0.2)));
+            
+            return vec3(x, y, z);
+        }
+
+        void main() {
+            vec3 transformed = position;
+
+            // Template Switching Logic
+            if (uCurrentTemplate == 0) {
+                // Default template (Sphere/Cloud)
+                transformed.x += sin(transformed.y * 5.0 + uTime) * 1.5;
+                transformed.z += cos(transformed.x * 5.0 + uTime) * 1.5;
+            } else if (uCurrentTemplate == 1) {
+                // Heart Template
+                transformed = heartShape(position);
+            } else if (uCurrentTemplate == 2) {
+                // Saturn Template
+                transformed = saturnShape(position);
+            }
+
+            // Apply Hand Scale (Expansion)
+            transformed *= (0.5 + uHandPinchScale * 1.5);
+
+            vec4 mvPosition = modelViewMatrix * vec4(transformed, 1.0);
+            
+            // Point Size based on distance and hand scale
+            gl_PointSize = (10.0 + uHandPinchScale * 30.0) * (50.0 / -mvPosition.z);
+            
+            gl_Position = projectionMatrix * mvPosition;
+            vColor = vec4(color, 1.0);
+        }
+    </script>
+
+    <script id="fragmentshader" type="x-shader/x-fragment">
+        uniform vec3 uBaseColor;
+        varying vec4 vColor;
+
+        void main() {
+            // Circle falloff for point texture
+            float r = 0.0, delta = 0.0, alpha = 1.0;
+            vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+            r = dot(cxy, cxy);
+            delta = fwidth(r);
+            alpha = 1.0 - smoothstep(1.0 - delta, 1.0, r);
+            
+            // Use the base color (controlled by hand X/Y) and vary it slightly
+            vec3 finalColor = vColor.rgb * uBaseColor;
+            
+            gl_FragColor = vec4(finalColor, alpha);
+        }
+    </script>
+
+    <script>
+        // --- Global Variables ---
+        let scene, camera, renderer, particles;
+        let globalHandPinchDistance = 0.5; // Normalized 0.0 to 1.0
+        let globalCurrentGestureID = 0;   // 0: Cloud, 1: Heart, 2: Saturn
+        let globalHandCenter = new THREE.Vector2(0.5, 0.5); // Normalized X/Y
+
+        // --- Three.js Setup ---
+        function initThree() {
+            const canvas = document.getElementById('three-canvas');
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+
+            // Scene, Camera, Renderer
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
+            camera.position.z = 50;
+
+            renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+            renderer.setSize(width, height);
+
+            window.addEventListener('resize', onWindowResize);
+
+            createParticles();
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function createParticles() {
+            const particleCount = 20000;
+            const geometry = new THREE.BufferGeometry();
+
+            const positions = new Float32Array(particleCount * 3);
+            const colors = new Float32Array(particleCount * 3);
+            const templateIDs = new Float32Array(particleCount);
+
+            const color = new THREE.Color();
+            
+            // Initialize positions and attributes
+            for (let i = 0; i < particleCount; i++) {
+                // Initial sphere distribution
+                positions[i * 3 + 0] = (Math.random() - 0.5) * 40;
+                positions[i * 3 + 1] = (Math.random() - 0.5) * 40;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 40;
+
+                // Random colors based on initial position
+                color.setHSL(i / particleCount, 1.0, 0.5);
+                colors[i * 3 + 0] = color.r;
+                colors[i * 3 + 1] = color.g;
+                colors[i * 3 + 2] = color.b;
+
+                // Randomly assign one of 3 template IDs (0, 1, or 2) for variety
+                templateIDs[i] = Math.floor(Math.random() * 3); 
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            geometry.setAttribute('templateID', new THREE.BufferAttribute(templateIDs, 1));
+
+            // Shader Material setup
+            const material = new THREE.ShaderMaterial({
+                uniforms: {
+                    uTime: { value: 0.0 },
+                    uBaseColor: { value: new THREE.Color(0xffffff) },
+                    uHandPinchScale: { value: globalHandPinchDistance },
+                    uCurrentTemplate: { value: globalCurrentGestureID },
+                    // You would load a custom point texture here, but we rely on gl_PointCoord in the shader for simplicity
+                },
+                vertexShader: document.getElementById('vertexshader').textContent,
+                fragmentShader: document.getElementById('fragmentshader').textContent,
+                blending: THREE.AdditiveBlending,
+                depthTest: false,
+                transparent: true
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+        }
+
+        // --- MediaPipe Hand Tracking Setup ---
+        const videoElement = document.getElementById('webcam');
+        let cameraUtil;
+        let lastGestureChangeTime = 0;
+        const gestureCooldown = 1.0; // Seconds
+
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+        });
+        
+        // Simple config for performance
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1, 
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        
+        hands.onResults(onResults);
+
+        // Start the Camera Feed
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            cameraUtil = new Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({ image: videoElement });
+                },
+                width: 640,
+                height: 480
+            });
+            cameraUtil.start();
+        }
+
+        function onResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                
+                // 1. Pinch Distance (Index Tip 8 vs Thumb Tip 4) for Scaling
+                const thumbTip = landmarks[4];
+                const indexTip = landmarks[8];
+                const dx = thumbTip.x - indexTip.x;
+                const dy = thumbTip.y - indexTip.y;
+                const dz = thumbTip.z - indexTip.z;
+                
+                // Euclidean distance, normalized and clamped for control
+                let pinchDistance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                // Map the distance (usually ~0.05 to ~0.3) to a 0-1 scale
+                globalHandPinchDistance = THREE.MathUtils.clamp((0.3 - pinchDistance) * 5.0, 0.0, 1.0);
+                
+                // 2. Hand Center for Color (Wrist 0)
+                globalHandCenter.x = landmarks[0].x;
+                globalHandCenter.y = landmarks[0].y;
+
+                // 3. Gesture for Template Switching (Peace Sign: Index & Middle up, others down)
+                const now = performance.now() / 1000;
+                
+                // Check if index (8) and middle (12) are significantly higher than ring (16) and pinky (20)
+                const isPeace = (indexTip.y < landmarks[5].y && // Index higher than its base
+                                 landmarks[12].y < landmarks[9].y && // Middle higher than its base
+                                 landmarks[16].y > landmarks[13].y && // Ring lower than its base
+                                 landmarks[20].y > landmarks[17].y); // Pinky lower than its base
+                
+                if (isPeace && now - lastGestureChangeTime > gestureCooldown) {
+                    globalCurrentGestureID = (globalCurrentGestureID + 1) % 3; // Cycle through 0, 1, 2
+                    lastGestureChangeTime = now;
+                    console.log(`Switched to Template ID: ${globalCurrentGestureID}`);
+                }
+
+            } else {
+                // If no hand detected, keep particles small and default
+                globalHandPinchDistance = 0.5;
+            }
+        }
+
+        // --- Animation Loop ---
+        function animate(time) {
+            requestAnimationFrame(animate);
+
+            // Update Uniforms
+            if (particles) {
+                const material = particles.material;
+                material.uniforms.uTime.value = time * 0.001;
+                material.uniforms.uHandPinchScale.value = globalHandPinchDistance;
+                material.uniforms.uCurrentTemplate.value = globalCurrentGestureID;
+                
+                // Map Hand X/Y position to color Hue
+                const hue = globalHandCenter.x;
+                const saturation = 1.0 - globalHandCenter.y;
+                material.uniforms.uBaseColor.value.setHSL(hue, saturation, 0.6);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- Execution ---
+        initThree();
+        animate(0);
+    </script>
+</body>
+</html>
